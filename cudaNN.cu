@@ -377,8 +377,13 @@ class FullyConnectedLayer : public HasInputLayer<IN_DIMS>, public HasOutputLayer
 
         const std::string m_name;
         const bool m_relu;
+
+        // N_NEURON array of Input (Array<D,H,W>)
         Array<Input, N_NEURONS> m_weight;
+
+        // N_NEURON array of Input (Array<D,H,W>)
         Array<Input, N_NEURONS> m_weight_deriv;
+
         Array<double, N_NEURONS> m_bias;
         Array<double, N_NEURONS> m_bias_deriv;
         const double m_keep_prob;
@@ -410,18 +415,29 @@ FullyConnectedLayer<IN_DIMS, N_NEURONS>::FullyConnectedLayer(const std::string &
 }
 
 __global__ void backprop_dev(){
-
+    /*
+     * TODO: for each neuron n check if kept, if relu false or if output(0,0,n) > 0
+     *           downstream_deriv of all n [d,h,w] += dropped(n)*upstream_deriv(n) * weight[d,h,w]
+     *           weight_deriv of n [d,h,w] += (dropped(n)*upstream_deriv(n)*input[d,h,w]) / mb_size
+     *           m_bias_deriv of n += (dropped(n)*upstream_deriv(n)) / mb_size
+     */
 }
 
 template <typename IN_DIMS, size_t N_NEURONS>
 void
 FullyConnectedLayer<IN_DIMS, N_NEURONS>::backprop(const Output &full_upstream_deriv, const double mb_size) {
-
     auto &upstream_deriv(full_upstream_deriv[0][0]);
     this->downstream_deriv = 0;
     auto &input(this->previous_layer->output);
 
-    backprop_dev<<<1,1>>>();
+    //TODO: copy host mem to device
+
+    //TODO: calculate optimal sizes
+    int grid_size = 1;
+    int block_size = 1;
+
+    //TODO: actually implement kernel
+    backprop_dev<<<grid_size,block_size>>>();
 
     for (size_t i = 0; i < N_NEURONS; i++) {
         if (m_current_kept(i) > 0) {
@@ -440,18 +456,32 @@ FullyConnectedLayer<IN_DIMS, N_NEURONS>::backprop(const Output &full_upstream_de
         }
     }
 
+    //TODO: copy device mem to host
+
     this->previous_layer->backprop(this->downstream_deriv, mb_size);
 }
 
 __global__ void update_weights_dev(){
-
+    /*
+     * TODO: for each neuron n
+     *           weight of n [d,h,w] -= rate*weight_deriv[n][d,h,w];
+     *           weight_deriv of n [d,h,w] = 0
+     *           bias of n -= rate*bias_deriv[n];
+     *           bias_deriv of n = 0;
+     */
 }
 
 template <typename IN_DIMS, size_t N_NEURONS>
 void
 FullyConnectedLayer<IN_DIMS, N_NEURONS>::update_weights(const float rate) {
+    //TODO: copy host mem to device
 
-    update_weights_dev<<<1,1>>>();
+    //TODO: calculate optimal sizes
+    int grid_size = 1;
+    int block_size = 1;
+
+    //TODO: actually implement kernel
+    update_weights_dev<<<grid_size,block_size>>>();
 
     for (size_t i = 0; i < N_NEURONS; i++) {
         for (size_t in_h = 0; in_h < IN_D; in_h++) {
@@ -470,19 +500,31 @@ FullyConnectedLayer<IN_DIMS, N_NEURONS>::update_weights(const float rate) {
         m_bias_deriv(i) = 0;
     }
 
+    //TODO: copy device mem to host
+
     this->next_layer->update_weights(rate);
 }
 
 __global__ void forward_dev(){
-
+    /*
+     * TODO: for each neuron, sum up weight * input, out = sum + bias,
+     * if relu then out = max(0, sum)
+     * out = 0 if dropped, or 1/dropout_rate if not dropped
+     */
 }
 
 template <typename IN_DIMS, size_t N_NEURONS>
 void
 FullyConnectedLayer<IN_DIMS, N_NEURONS>::forward(const Input &input, const Array<Input, N_NEURONS> &weight, const Array<double, N_NEURONS> &bias,
  const Array<double, N_NEURONS> &dropped, Output &output) {
+     //TODO: copy host mem to device
 
-     forward_dev<<<1,1>>>();
+     //TODO: calculate optimal sizes
+     int grid_size = 1;
+     int block_size = 1;
+
+     //TODO: actually implement kernel
+     forward_dev<<<grid_size,block_size>>>();
 
      //std::cout << "FC Layer, forward: connect each neuron to everything & generate output from input" << std::endl;
      // Connect each neuron to everything.
@@ -505,6 +547,8 @@ FullyConnectedLayer<IN_DIMS, N_NEURONS>::forward(const Input &input, const Array
          assert(dropped(i) == 0 || dropped(i) >= 1);
          out *= dropped(i);
      }
+
+     //TODO: copy device mem to host
  }
 
 
