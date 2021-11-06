@@ -23,12 +23,16 @@
 #include <iostream>
 #include <iomanip>
 
+/*
+ * Preliminaries
+ */
+
 using std::size_t;
 using Precision = double;
 constexpr double DELTA_H = 1E-5;
-constexpr int PADDING = 2;
-constexpr int FILTER_H = 5;
-constexpr int FILTER_W = 5;
+//constexpr int PADDING = 2;
+//constexpr int FILTER_H = 5;
+//constexpr int FILTER_W = 5;
 
 inline double
 derivative_error(double n, double d) {
@@ -114,7 +118,7 @@ operator<<(std::ostream &os, const Array<T, D3, D2, D1, D0> &a) {
     return os;
 }
 
-// General definition of template.
+// General definition of Array template.
 template <typename T, size_t D, size_t... Ds>
 class Array {
         friend std::ostream &operator<<<>(std::ostream &, const Array &);
@@ -158,7 +162,7 @@ class Array {
         Array<T, Ds...> array[D];
 };
 
-// Base case.
+// Array base case.
 template <typename T, size_t D>
 class Array<T, D> {
         friend std::ostream &operator<<<>(std::ostream &, const Array &);
@@ -275,6 +279,7 @@ class HasOutputLayer<Dims<OUT_D, OUT_H, OUT_W>> {
 };
 
 /*
+ * InputLayer
  * This layer accepts an input image from MNIST.
  */
 
@@ -400,9 +405,12 @@ FullyConnectedLayer<IN_DIMS, N_NEURONS>::FullyConnectedLayer(const std::string &
     }
 
     m_bias = 0;
-
     m_weight_deriv = 0;
     m_bias_deriv = 0;
+}
+
+__global__ void backprop_dev(){
+
 }
 
 template <typename IN_DIMS, size_t N_NEURONS>
@@ -413,6 +421,8 @@ FullyConnectedLayer<IN_DIMS, N_NEURONS>::backprop(const Output &full_upstream_de
     this->downstream_deriv = 0;
     auto &input(this->previous_layer->output);
 
+    backprop_dev<<<1,1>>>();
+
     for (size_t i = 0; i < N_NEURONS; i++) {
         if (m_current_kept(i) > 0) {
             if (!m_relu || this->output(0, 0, i) > 0) {
@@ -420,11 +430,6 @@ FullyConnectedLayer<IN_DIMS, N_NEURONS>::backprop(const Output &full_upstream_de
                     for (size_t in_i = 0; in_i < IN_H; in_i++) {
                         for (size_t in_j = 0; in_j < IN_W; in_j++) {
                             this->downstream_deriv[in_h][in_i][in_j] += m_current_kept(i)*upstream_deriv[i]*m_weight[i][in_h][in_i][in_j];
-                            /*
-                            fprintf(stderr, "%lu, %lu, %lu: %f\n",
-                             in_h, in_i, in_j,
-                             this->downstream_deriv[in_h][in_i][in_j]);
-                            */
                             // Divide by minibatch size to get the average.
                             m_weight_deriv[i][in_h][in_i][in_j] += (m_current_kept(i)*upstream_deriv[i]*input[in_h][in_i][in_j])/mb_size;
                         }
@@ -438,11 +443,15 @@ FullyConnectedLayer<IN_DIMS, N_NEURONS>::backprop(const Output &full_upstream_de
     this->previous_layer->backprop(this->downstream_deriv, mb_size);
 }
 
+__global__ void update_weights_dev(){
+
+}
+
 template <typename IN_DIMS, size_t N_NEURONS>
 void
 FullyConnectedLayer<IN_DIMS, N_NEURONS>::update_weights(const float rate) {
 
-
+    update_weights_dev<<<1,1>>>();
 
     for (size_t i = 0; i < N_NEURONS; i++) {
         for (size_t in_h = 0; in_h < IN_D; in_h++) {
@@ -464,10 +473,44 @@ FullyConnectedLayer<IN_DIMS, N_NEURONS>::update_weights(const float rate) {
     this->next_layer->update_weights(rate);
 }
 
+__global__ void forward_dev(){
+
+}
+
+template <typename IN_DIMS, size_t N_NEURONS>
+void
+FullyConnectedLayer<IN_DIMS, N_NEURONS>::forward(const Input &input, const Array<Input, N_NEURONS> &weight, const Array<double, N_NEURONS> &bias,
+ const Array<double, N_NEURONS> &dropped, Output &output) {
+
+     forward_dev<<<1,1>>>();
+
+     //std::cout << "FC Layer, forward: connect each neuron to everything & generate output from input" << std::endl;
+     // Connect each neuron to everything.
+     for (size_t i = 0; i < N_NEURONS; i++) {
+         double &out(output[0][0][i]);
+         out = 0;
+         for (size_t in_h = 0; in_h < IN_D; in_h++) {
+             for (size_t in_i = 0; in_i < IN_H; in_i++) {
+                 for (size_t in_j = 0; in_j < IN_W; in_j++) {
+                     out += weight[i][in_h][in_i][in_j]*input[in_h][in_i][in_j];
+                 }
+             }
+         }
+         out += bias(i);
+         if (m_relu) {
+             out = std::max(0.0, out);
+         }
+         // Value is 0 if dropped, or 1/dropout-rate if not dropped, so as to maintain constant overall
+         // expected value.
+         assert(dropped(i) == 0 || dropped(i) >= 1);
+         out *= dropped(i);
+     }
+ }
+
+
 template <typename IN_DIMS, size_t N_NEURONS>
 void
 FullyConnectedLayer<IN_DIMS, N_NEURONS>::check_weight_derivative(const int label) {
-
 
     fprintf(stderr, "Checking weight derivative of %s.\n", m_name.c_str());
 
@@ -569,39 +612,6 @@ FullyConnectedLayer<IN_DIMS, N_NEURONS>::check_downstream_derivative(const int l
     }
 }
 
-template <typename IN_DIMS, size_t N_NEURONS>
-void
-FullyConnectedLayer<IN_DIMS, N_NEURONS>::forward(const Input &input, const Array<Input, N_NEURONS> &weight, const Array<double, N_NEURONS> &bias,
- const Array<double, N_NEURONS> &dropped, Output &output) {
-    //std::cout << "FC Layer, forward: connect each neuron to everything & generate output from input" << std::endl;
-    // Connect each neuron to everything.
-    for (size_t i = 0; i < N_NEURONS; i++) {
-        double &out(output[0][0][i]);
-        out = 0;
-        for (size_t in_h = 0; in_h < IN_D; in_h++) {
-            for (size_t in_i = 0; in_i < IN_H; in_i++) {
-                for (size_t in_j = 0; in_j < IN_W; in_j++) {
-                    out += weight[i][in_h][in_i][in_j]*input[in_h][in_i][in_j];
-                }
-            }
-        }
-        out += bias(i);
-        if (m_relu) {
-            out = std::max(0.0, out);
-        }
-        // Value is 0 if dropped, or 1/dropout-rate if not dropped, so as to maintain constant overall
-        // expected value.
-        assert(dropped(i) == 0 || dropped(i) >= 1);
-        /*
-        if (dropped(i) == 0) {
-            fprintf(stderr, "%d dropped\n", int(i));
-        } else if (dropped(i) > 1) {
-            fprintf(stderr, "%d expanded by %f\n", int(i), dropped(i));
-        }
-        */
-        out *= dropped(i);
-    }
-}
 
 /*
  * SoftmaxLayer
@@ -736,6 +746,10 @@ class CrossEntropyLayer : public HasInputLayer<Dims<1, 1, N>> {
         }
 };
 
+/*
+ * Reading images
+ */
+
 void
 swap(int &i) {
     // Some of the & are superfluous.
@@ -863,10 +877,13 @@ read_mnist_labels(const std::string &fn, unsigned char (&labels)[N]) {
     rv = close(fd); assert(rv == 0);
 }
 
+/*
+ * Train and Test
+ */
 
 void
 run() {
-    std::cout << "run4 commencing..." << std::endl;
+    std::cout << "run commencing..." << std::endl;
     static float training_images[60'000][28][28];
     read_mnist_images("mnist/train-images-idx3-ubyte", training_images);
     output_pgm("img0.pgm", training_images[0]);
@@ -937,6 +954,9 @@ run() {
     }
 }
 
+/*
+ * Main
+ */
 
 int
 main() {
@@ -984,7 +1004,6 @@ main() {
 /*
  * Everything below here is unused.
  */
-
 
 void
 test2() {
