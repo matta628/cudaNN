@@ -27,6 +27,15 @@
  * Preliminaries
  */
 
+#define gpu_assert(rv) gpu_assert_h((rv), __FILE__, __LINE__)
+void
+gpu_assert_h(cudaError_t code, const char *file, int line, bool abort=true) {
+    if (code != cudaSuccess) {
+        fprintf(stderr,"GPUassert: %s %s %d\n", cudaGetErrorString(code), file, line);
+        if (abort) exit(code);
+    }
+}
+
 using std::size_t;
 using Precision = double;
 constexpr double DELTA_H = 1E-5;
@@ -414,13 +423,16 @@ FullyConnectedLayer<IN_DIMS, N_NEURONS>::FullyConnectedLayer(const std::string &
     m_bias_deriv = 0;
 }
 
-__global__ void backprop_dev(){
+__global__ void backprop_dev(double *d_current_kept, bool m_relu, double *output,
+double *d_downstream_deriv, double *d_upstream_deriv, double *d_weight,
+double *d_weight_deriv, double *d_input, double mb_size, double *d_bias_deriv){
     /*
      * TODO: for each neuron n check if kept, if relu false or if output(0,0,n) > 0
      *           downstream_deriv of all n [d,h,w] += dropped(n)*upstream_deriv(n) * weight[d,h,w]
      *           weight_deriv of n [d,h,w] += (dropped(n)*upstream_deriv(n)*input[d,h,w]) / mb_size
      *           m_bias_deriv of n += (dropped(n)*upstream_deriv(n)) / mb_size
      */
+
 }
 
 template <typename IN_DIMS, size_t N_NEURONS>
@@ -431,13 +443,72 @@ FullyConnectedLayer<IN_DIMS, N_NEURONS>::backprop(const Output &full_upstream_de
     auto &input(this->previous_layer->output);
 
     //TODO: copy host mem to device
+    cudaError_t rv_ce;
+
+    int DHW = IN_DIMS::N;
+    int NDHW = N_NEURONS*DHW;
+
+    //Array<N_NEURONS> m_current_kept
+    double *d_current_kept;
+    rv_ce = cudaMalloc(&d_current_kept, N_NEURONS*sizeof(double));
+    gpu_assert(rv_ce);
+    rv_ce = cudaMemcpy(d_current_kept, &this->m_current_kept, N_NEURONS*sizeof(double), cudaMemcpyHostToDevice);
+    gpu_assert(rv_ce);
+
+    //Array<1,1,N_NEURONS> output
+    double *d_output;
+    rv_ce = cudaMalloc(&d_output, N_NEURONS*sizeof(double));
+    gpu_assert(rv_ce);
+    rv_ce = cudaMemcpy(d_output, &this->output[0][0], N_NEURONS*sizeof(double), cudaMemcpyHostToDevice);
+    gpu_assert(rv_ce);
+
+    //Array<D,H,W> downstream_deriv
+    double *d_downstream_deriv;
+    rv_ce = cudaMalloc(&d_downstream_deriv, DHW*sizeof(double));
+    gpu_assert(rv_ce);
+    rv_ce = cudaMemcpy(d_downstream_deriv, &this->downstream_deriv, DHW*sizeof(double), cudaMemcpyHostToDevice);
+    gpu_assert(rv_ce);
+
+    //Array<N_NEURONS> upstream_deriv
+    double *d_upstream_deriv;
+    rv_ce = cudaMalloc(&d_upstream_deriv, N_NEURONS*sizeof(double));
+    gpu_assert(rv_ce);
+    rv_ce = cudaMemcpy(d_upstream_deriv, &upstream_deriv, N_NEURONS*sizeof(double), cudaMemcpyHostToDevice);
+    gpu_assert(rv_ce);
+
+    //Array<Array<D,H,W>, N_NEURON> m_weight
+    double *d_weight;
+    rv_ce = cudaMalloc(&d_weight, NDHW*sizeof(double));
+    gpu_assert(rv_ce);
+    rv_ce = cudaMemcpy(d_weight, &this->m_weight, NDHW*sizeof(double), cudaMemcpyHostToDevice);
+    gpu_assert(rv_ce);
+
+    //Array<Array<D,H,W>, N_NEURON> m_weight_deriv
+    double *d_weight_deriv;
+    rv_ce = cudaMalloc(&d_weight_deriv, NDHW*sizeof(double));
+    gpu_assert(rv_ce);
+    rv_ce = cudaMemcpy(d_weight_deriv, &this->m_weight_deriv, NDHW*sizeof(double), cudaMemcpyHostToDevice);
+    gpu_assert(rv_ce);
+
+    //Array<D,H,W> input
+    double *d_input;
+    rv_ce = cudaMalloc(&d_input, DHW*sizeof(double));
+    gpu_assert(rv_ce);
+    rv_ce = cudaMemcpy(d_input, &input, DHW*sizeof(double), cudaMemcpyHostToDevice);
+    gpu_assert(rv_ce);
+
+    //Array<N_NEURONS> m_bias_deriv
+    double *d_bias_deriv;
+    rv_ce = cudaMalloc(&d_bias_deriv, N_NEURONS*sizeof(double));
+    gpu_assert(rv_ce);
 
     //TODO: calculate optimal sizes
     int grid_size = 1;
     int block_size = 1;
 
     //TODO: actually implement kernel
-    backprop_dev<<<grid_size,block_size>>>();
+    backprop_dev<<<grid_size,block_size>>>(d_current_kept, m_relu, d_output, d_downstream_deriv,
+        d_upstream_deriv, d_weight, d_weight_deriv, d_input, mb_size, d_bias_deriv);
 
     for (size_t i = 0; i < N_NEURONS; i++) {
         if (m_current_kept(i) > 0) {
@@ -457,6 +528,24 @@ FullyConnectedLayer<IN_DIMS, N_NEURONS>::backprop(const Output &full_upstream_de
     }
 
     //TODO: copy device mem to host
+    //downstream
+    rv_ce = cudaMemcpy(&this->downstream_deriv, d_downstream_deriv, DHW*sizeof(double), cudaMemcpyDeviceToHost);
+    gpu_assert(rv_ce);
+    //weight_deriv
+    rv_ce = cudaMemcpy(&this->m_weight_deriv, d_weight_deriv, NDHW*sizeof(double), cudaMemcpyDeviceToHost);
+    gpu_assert(rv_ce);
+    //bias deriv
+    rv_ce = cudaMemcpy(&this->m_bias_deriv, d_bias_deriv, N_NEURONS*sizeof(double), cudaMemcpyDeviceToHost);
+    gpu_assert(rv_ce);
+
+    cudaFree(d_current_kept);
+    cudaFree(d_output);
+    cudaFree(d_downstream_deriv);
+    cudaFree(d_upstream_deriv);
+    cudaFree(d_weight);
+    cudaFree(d_weight_deriv);
+    cudaFree(d_input);
+    cudaFree(d_bias_deriv);
 
     this->previous_layer->backprop(this->downstream_deriv, mb_size);
 }
