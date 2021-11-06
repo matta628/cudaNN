@@ -501,6 +501,8 @@ FullyConnectedLayer<IN_DIMS, N_NEURONS>::backprop(const Output &full_upstream_de
     double *d_bias_deriv;
     rv_ce = cudaMalloc(&d_bias_deriv, N_NEURONS*sizeof(double));
     gpu_assert(rv_ce);
+    rv_ce = cudaMemcpy(d_bias_deriv, &m_bias_deriv, N_NEURONS*sizeof(double), cudaMemcpyHostToDevice);
+    gpu_assert(rv_ce);
 
     //TODO: calculate optimal sizes
     int grid_size = 1;
@@ -636,29 +638,75 @@ FullyConnectedLayer<IN_DIMS, N_NEURONS>::update_weights(const float rate) {
     rv_ce = cudaMemcpy(&this->m_bias_deriv, d_bias_deriv, N_NEURONS*sizeof(double), cudaMemcpyDeviceToHost);
     gpu_assert(rv_ce);
 
+    //TODO: deallocate device pointers
+    cudaFree(d_weight);
+    cudaFree(d_weight_deriv);
+    cudaFree(d_bias);
+    cudaFree(d_bias_deriv);
+
     this->next_layer->update_weights(rate);
 }
 
-__global__ void forward_dev(){
+__global__ void forward_dev(double *d_output, double *d_weight, double *d_input,
+double *d_bias, bool m_relu, double *d_current_kept){
     /*
      * TODO: for each neuron, sum up weight * input, out = sum + bias,
      * if relu then out = max(0, sum)
      * out = 0 if dropped, or 1/dropout_rate if not dropped
      */
+
 }
 
 template <typename IN_DIMS, size_t N_NEURONS>
 void
 FullyConnectedLayer<IN_DIMS, N_NEURONS>::forward(const Input &input, const Array<Input, N_NEURONS> &weight, const Array<double, N_NEURONS> &bias,
- const Array<double, N_NEURONS> &dropped, Output &output) {
+ const Array<double, N_NEURONS> &current_kept, Output &output) {
      //TODO: copy host mem to device
+     cudaError_t rv_ce;
+     int DHW = IN_DIMS::N;
+     int NDHW = N_NEURONS*DHW;
+
+     //Array<1,1,N_NEURONS> output
+     double *d_output;
+     rv_ce = cudaMalloc(&d_output, N_NEURONS*sizeof(double));
+     gpu_assert(rv_ce);
+     rv_ce = cudaMemcpy(d_output, &output[0][0], N_NEURONS*sizeof(double), cudaMemcpyHostToDevice);
+     gpu_assert(rv_ce);
+
+     //Array<Array<D,H,W>, N_NEURON> m_weight
+     double *d_weight;
+     rv_ce = cudaMalloc(&d_weight, NDHW*sizeof(double));
+     gpu_assert(rv_ce);
+     rv_ce = cudaMemcpy(d_weight, &weight, NDHW*sizeof(double), cudaMemcpyHostToDevice);
+     gpu_assert(rv_ce);
+
+     //Array<D,H,W> input
+     double *d_input;
+     rv_ce = cudaMalloc(&d_input, DHW*sizeof(double));
+     gpu_assert(rv_ce);
+     rv_ce = cudaMemcpy(d_input, &input, DHW*sizeof(double), cudaMemcpyHostToDevice);
+     gpu_assert(rv_ce);
+
+     //N_NEURONS m_bias
+     double *d_bias;
+     rv_ce = cudaMalloc(&d_bias, N_NEURONS*sizeof(double));
+     gpu_assert(rv_ce);
+     rv_ce = cudaMemcpy(d_bias, &bias, N_NEURONS*sizeof(double), cudaMemcpyHostToDevice);
+     gpu_assert(rv_ce);
+
+     //Array<N_NEURONS> m_current_kept
+     double *d_current_kept;
+     rv_ce = cudaMalloc(&d_current_kept, N_NEURONS*sizeof(double));
+     gpu_assert(rv_ce);
+     rv_ce = cudaMemcpy(d_current_kept, &current_kept, N_NEURONS*sizeof(double), cudaMemcpyHostToDevice);
+     gpu_assert(rv_ce);
 
      //TODO: calculate optimal sizes
      int grid_size = 1;
      int block_size = 1;
 
      //TODO: actually implement kernel
-     forward_dev<<<grid_size,block_size>>>();
+     forward_dev<<<grid_size,block_size>>>(d_output, d_weight, d_input, d_bias, m_relu, d_current_kept);
 
      //std::cout << "FC Layer, forward: connect each neuron to everything & generate output from input" << std::endl;
      // Connect each neuron to everything.
@@ -678,11 +726,21 @@ FullyConnectedLayer<IN_DIMS, N_NEURONS>::forward(const Input &input, const Array
          }
          // Value is 0 if dropped, or 1/dropout-rate if not dropped, so as to maintain constant overall
          // expected value.
-         assert(dropped(i) == 0 || dropped(i) >= 1);
-         out *= dropped(i);
+         assert(current_kept(i) == 0 || current_kept(i) >= 1);
+         out *= current_kept(i);
      }
 
      //TODO: copy device mem to host
+
+     rv_ce = cudaMemcpy(&output[0][0], d_output, N_NEURONS*sizeof(double), cudaMemcpyDeviceToHost);
+     gpu_assert(rv_ce);
+
+     //TODO: deallocate device pointers
+     cudaFree(d_output);
+     cudaFree(d_weight);
+     cudaFree(d_input);
+     cudaFree(d_bias);
+     cudaFree(d_current_kept);
  }
 
 
