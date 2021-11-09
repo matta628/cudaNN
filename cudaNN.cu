@@ -22,6 +22,7 @@
 #include <random>
 #include <iostream>
 #include <iomanip>
+#include <chrono>
 
 /*
  * Preliminaries
@@ -347,8 +348,8 @@ class FullyConnectedLayer : public HasInputLayer<IN_DIMS>, public HasOutputLayer
         static_assert(OUT_H == 1);
 
     public:
-
         FullyConnectedLayer(const std::string &n, const bool relu, const double do_rate, const int seed_seq);
+        ~FullyConnectedLayer();
         // This layer has no loss function, so will always call it's forward
         // layer.  If it has no forward layer, that's a bug.
         virtual void train(const int label, const double mb_size) override {
@@ -399,6 +400,17 @@ class FullyConnectedLayer : public HasInputLayer<IN_DIMS>, public HasOutputLayer
         Array<double, N_NEURONS> m_current_kept;
         const Array<double, N_NEURONS> m_all_kept;
 
+
+        double *d_input;
+        double *d_output;
+        double *d_downstream_deriv;
+        double *d_upstream_deriv;
+        double *d_weight;
+        double *d_weight_deriv;
+        double *d_bias;
+        double *d_bias_deriv;
+        double *d_current_kept;
+
         std::default_random_engine m_eng;
 };
 
@@ -421,6 +433,43 @@ FullyConnectedLayer<IN_DIMS, N_NEURONS>::FullyConnectedLayer(const std::string &
     m_bias = 0;
     m_weight_deriv = 0;
     m_bias_deriv = 0;
+
+    cudaError_t rv_ce;
+    int DHW = IN_DIMS::N;
+    int NDHW = N_NEURONS*DHW;
+
+    rv_ce = cudaMalloc(&d_current_kept, N_NEURONS*sizeof(double));
+    gpu_assert(rv_ce);
+    rv_ce = cudaMalloc(&d_output, N_NEURONS*sizeof(double));
+    gpu_assert(rv_ce);
+    rv_ce = cudaMalloc(&d_downstream_deriv, DHW*sizeof(double));
+    gpu_assert(rv_ce);
+    rv_ce = cudaMalloc(&d_upstream_deriv, N_NEURONS*sizeof(double));
+    gpu_assert(rv_ce);
+    rv_ce = cudaMalloc(&d_weight, NDHW*sizeof(double));
+    gpu_assert(rv_ce);
+    rv_ce = cudaMalloc(&d_weight_deriv, NDHW*sizeof(double));
+    gpu_assert(rv_ce);
+    rv_ce = cudaMalloc(&d_input, DHW*sizeof(double));
+    gpu_assert(rv_ce);
+    rv_ce = cudaMalloc(&d_bias_deriv, N_NEURONS*sizeof(double));
+    gpu_assert(rv_ce);
+    rv_ce = cudaMalloc(&d_bias, N_NEURONS*sizeof(double));
+    gpu_assert(rv_ce);
+
+}
+
+template <typename IN_DIMS, size_t N_NEURONS>
+FullyConnectedLayer<IN_DIMS, N_NEURONS>::~FullyConnectedLayer(){
+    cudaFree(d_current_kept);
+    cudaFree(d_output);
+    cudaFree(d_downstream_deriv);
+    cudaFree(d_upstream_deriv);
+    cudaFree(d_weight);
+    cudaFree(d_weight_deriv);
+    cudaFree(d_input);
+    cudaFree(d_bias_deriv);
+    cudaFree(d_bias);
 }
 
 __global__ void backprop_dev(double *d_current_kept, bool m_relu, double *d_output,
@@ -467,7 +516,6 @@ FullyConnectedLayer<IN_DIMS, N_NEURONS>::backprop(const Output &full_upstream_de
     this->downstream_deriv = 0;
     auto &input(this->previous_layer->output);
 
-
     //TODO: copy host mem to device
     cudaError_t rv_ce;
 
@@ -475,69 +523,40 @@ FullyConnectedLayer<IN_DIMS, N_NEURONS>::backprop(const Output &full_upstream_de
     int NDHW = N_NEURONS*DHW;
 
     //Array<N_NEURONS> m_current_kept
-    double *d_current_kept;
-    rv_ce = cudaMalloc(&d_current_kept, N_NEURONS*sizeof(double));
-    gpu_assert(rv_ce);
     rv_ce = cudaMemcpy(d_current_kept, &this->m_current_kept, N_NEURONS*sizeof(double), cudaMemcpyHostToDevice);
     gpu_assert(rv_ce);
 
     //Array<1,1,N_NEURONS> output
-    double *d_output;
-    rv_ce = cudaMalloc(&d_output, N_NEURONS*sizeof(double));
-    gpu_assert(rv_ce);
     rv_ce = cudaMemcpy(d_output, &this->output[0][0], N_NEURONS*sizeof(double), cudaMemcpyHostToDevice);
     gpu_assert(rv_ce);
 
     //Array<D,H,W> downstream_deriv
-    double *d_downstream_deriv;
-    rv_ce = cudaMalloc(&d_downstream_deriv, DHW*sizeof(double));
-    gpu_assert(rv_ce);
     rv_ce = cudaMemcpy(d_downstream_deriv, &this->downstream_deriv, DHW*sizeof(double), cudaMemcpyHostToDevice);
     gpu_assert(rv_ce);
 
     //Array<N_NEURONS> upstream_deriv
-    double *d_upstream_deriv;
-    rv_ce = cudaMalloc(&d_upstream_deriv, N_NEURONS*sizeof(double));
-    gpu_assert(rv_ce);
     rv_ce = cudaMemcpy(d_upstream_deriv, &upstream_deriv, N_NEURONS*sizeof(double), cudaMemcpyHostToDevice);
     gpu_assert(rv_ce);
 
     //Array<Array<D,H,W>, N_NEURON> m_weight
-    double *d_weight;
-    rv_ce = cudaMalloc(&d_weight, NDHW*sizeof(double));
-    gpu_assert(rv_ce);
     rv_ce = cudaMemcpy(d_weight, &this->m_weight, NDHW*sizeof(double), cudaMemcpyHostToDevice);
     gpu_assert(rv_ce);
 
     //Array<Array<D,H,W>, N_NEURON> m_weight_deriv
-    double *d_weight_deriv;
-    rv_ce = cudaMalloc(&d_weight_deriv, NDHW*sizeof(double));
-    gpu_assert(rv_ce);
     rv_ce = cudaMemcpy(d_weight_deriv, &this->m_weight_deriv, NDHW*sizeof(double), cudaMemcpyHostToDevice);
     gpu_assert(rv_ce);
 
     //Array<D,H,W> input
-    double *d_input;
-    rv_ce = cudaMalloc(&d_input, DHW*sizeof(double));
-    gpu_assert(rv_ce);
     rv_ce = cudaMemcpy(d_input, &input, DHW*sizeof(double), cudaMemcpyHostToDevice);
     gpu_assert(rv_ce);
 
     //Array<N_NEURONS> m_bias_deriv
-    double *d_bias_deriv;
-    rv_ce = cudaMalloc(&d_bias_deriv, N_NEURONS*sizeof(double));
-    gpu_assert(rv_ce);
     rv_ce = cudaMemcpy(d_bias_deriv, &m_bias_deriv, N_NEURONS*sizeof(double), cudaMemcpyHostToDevice);
     gpu_assert(rv_ce);
 
     //TODO: calculate optimal sizes
     int block_size = 128;
     int grid_size = (NDHW + block_size - 1)/ block_size;
-
-
-//    for (int i = 0; i < 10; i++){
-//        std::cout << "downstream before backprop\t" << this->downstream_deriv[0][0][i] << std::endl;
-//    }
 
     //TODO: actually implement kernel
     backprop_dev<<<grid_size,block_size>>>(d_current_kept, m_relu, d_output, d_downstream_deriv,
@@ -554,16 +573,6 @@ FullyConnectedLayer<IN_DIMS, N_NEURONS>::backprop(const Output &full_upstream_de
     //bias deriv
     rv_ce = cudaMemcpy(&this->m_bias_deriv, d_bias_deriv, N_NEURONS*sizeof(double), cudaMemcpyDeviceToHost);
     gpu_assert(rv_ce);
-
-    //TODO: deallocate device pointers
-    cudaFree(d_current_kept);
-    cudaFree(d_output);
-    cudaFree(d_downstream_deriv);
-    cudaFree(d_upstream_deriv);
-    cudaFree(d_weight);
-    cudaFree(d_weight_deriv);
-    cudaFree(d_input);
-    cudaFree(d_bias_deriv);
 
 /*
     for (size_t i = 0; i < N_NEURONS; i++) {
@@ -622,31 +631,18 @@ FullyConnectedLayer<IN_DIMS, N_NEURONS>::update_weights(const float rate) {
     int NDHW = N_NEURONS*DHW;
 
     //Array<Array<D,H,W>, N_NEURON> m_weight
-    double *d_weight;
-    rv_ce = cudaMalloc(&d_weight, NDHW*sizeof(double));
-    gpu_assert(rv_ce);
-
     rv_ce = cudaMemcpy(d_weight, &this->m_weight, NDHW*sizeof(double), cudaMemcpyHostToDevice);
     gpu_assert(rv_ce);
 
     //Array<Array<D,H,W>, N_NEURON> m_weight_deriv
-    double *d_weight_deriv;
-    rv_ce = cudaMalloc(&d_weight_deriv, NDHW*sizeof(double));
-    gpu_assert(rv_ce);
     rv_ce = cudaMemcpy(d_weight_deriv, &this->m_weight_deriv, NDHW*sizeof(double), cudaMemcpyHostToDevice);
     gpu_assert(rv_ce);
 
     //N_NEURONS m_bias
-    double *d_bias;
-    rv_ce = cudaMalloc(&d_bias, N_NEURONS*sizeof(double));
-    gpu_assert(rv_ce);
     rv_ce = cudaMemcpy(d_bias, &this->m_bias, N_NEURONS*sizeof(double), cudaMemcpyHostToDevice);
     gpu_assert(rv_ce);
 
     //N_NEURONS m_bias_deriv
-    double *d_bias_deriv;
-    rv_ce = cudaMalloc(&d_bias_deriv, N_NEURONS*sizeof(double));
-    gpu_assert(rv_ce);
     rv_ce = cudaMemcpy(d_bias_deriv, &this->m_bias_deriv, N_NEURONS*sizeof(double), cudaMemcpyHostToDevice);
     gpu_assert(rv_ce);
 
@@ -672,10 +668,6 @@ FullyConnectedLayer<IN_DIMS, N_NEURONS>::update_weights(const float rate) {
     gpu_assert(rv_ce);
 
     //TODO: deallocate device pointers
-    cudaFree(d_weight);
-    cudaFree(d_weight_deriv);
-    cudaFree(d_bias);
-    cudaFree(d_bias_deriv);
 
     /*
     for (size_t i = 0; i < N_NEURONS; i++) {
@@ -742,36 +734,19 @@ FullyConnectedLayer<IN_DIMS, N_NEURONS>::forward(const Input &input, const Array
      int DHW = IN_DIMS::N;
      int NDHW = N_NEURONS*DHW;
 
-     //Array<1,1,N_NEURONS> output
-     double *d_output;
-     rv_ce = cudaMalloc(&d_output, N_NEURONS*sizeof(double));
-     gpu_assert(rv_ce);
-
      //Array<Array<D,H,W>, N_NEURON> m_weight
-     double *d_weight;
-     rv_ce = cudaMalloc(&d_weight, NDHW*sizeof(double));
-     gpu_assert(rv_ce);
      rv_ce = cudaMemcpy(d_weight, &weight, NDHW*sizeof(double), cudaMemcpyHostToDevice);
      gpu_assert(rv_ce);
 
      //Array<D,H,W> input
-     double *d_input;
-     rv_ce = cudaMalloc(&d_input, DHW*sizeof(double));
-     gpu_assert(rv_ce);
      rv_ce = cudaMemcpy(d_input, &input, DHW*sizeof(double), cudaMemcpyHostToDevice);
      gpu_assert(rv_ce);
 
      //N_NEURONS m_bias
-     double *d_bias;
-     rv_ce = cudaMalloc(&d_bias, N_NEURONS*sizeof(double));
-     gpu_assert(rv_ce);
      rv_ce = cudaMemcpy(d_bias, &bias, N_NEURONS*sizeof(double), cudaMemcpyHostToDevice);
      gpu_assert(rv_ce);
 
      //Array<N_NEURONS> m_current_kept
-     double *d_current_kept;
-     rv_ce = cudaMalloc(&d_current_kept, N_NEURONS*sizeof(double));
-     gpu_assert(rv_ce);
      rv_ce = cudaMemcpy(d_current_kept, &current_kept, N_NEURONS*sizeof(double), cudaMemcpyHostToDevice);
      gpu_assert(rv_ce);
 
@@ -784,23 +759,9 @@ FullyConnectedLayer<IN_DIMS, N_NEURONS>::forward(const Input &input, const Array
          N_NEURONS, IN_DIMS::D, IN_DIMS::H, IN_DIMS::W);
 
      //TODO: copy device mem to host
-     double *out_test = new double[N_NEURONS];
      rv_ce = cudaMemcpy(&output[0][0], d_output, N_NEURONS*sizeof(double), cudaMemcpyDeviceToHost);
      gpu_assert(rv_ce);
 
-     //TODO: deallocate device pointers
-     cudaFree(d_output);
-     cudaFree(d_weight);
-     cudaFree(d_input);
-     cudaFree(d_bias);
-     cudaFree(d_current_kept);
-
-/*
-     for (int i = 0; i < N_NEURONS; i++){
-         std::cout << out_test[i] << ' ';
-     }
-     std::cout << std::endl;
-*/
 /*
      //std::cout << "FC Layer, forward: connect each neuron to everything & generate output from input" << std::endl;
      // Connect each neuron to everything.
@@ -1210,47 +1171,47 @@ run() {
     read_mnist_images("mnist/train-images-idx3-ubyte", training_images);
     output_pgm("img0.pgm", training_images[0]);
     output_pgm("img59999.pgm", training_images[59999]);
-    std::cout << "training images loaded..." << std::endl;
+    //std::cout << "training images loaded..." << std::endl;
 
     static unsigned char training_labels[60'000];
     read_mnist_labels("mnist/train-labels-idx1-ubyte", training_labels);
     assert(training_labels[0] == 5);
     assert(training_labels[59'999] == 8);
-    std::cout << "training labels loaded..." << std::endl;
+    //std::cout << "training labels loaded..." << std::endl;
 
     static float test_images[10'000][28][28];
     read_mnist_images("mnist/t10k-images-idx3-ubyte", test_images);
-    std::cout << "test images loaded..." << std::endl;
+    //std::cout << "test images loaded..." << std::endl;
     static unsigned char test_labels[10'000];
     read_mnist_labels("mnist/t10k-labels-idx1-ubyte", test_labels);
-    std::cout << "test labels loaded..." << std::endl;
+    //std::cout << "test labels loaded..." << std::endl;
 
     static InputLayer<Dims<1, 28, 28>> il;
     static FullyConnectedLayer<Dims<1, 28, 28>, 1024> dl1("dl1", true, .3, 1);
     static FullyConnectedLayer<Dims<1, 1, 1024>, 10> dl2("dl2", false, 0, 2);
     static SoftmaxLayer<10> sm;
     static CrossEntropyLayer<10> ce;
-    std::cout << "layers defined..." << std::endl;
+    //std::cout << "layers defined..." << std::endl;
 
     il.next_layer = &dl1; dl1.previous_layer = &il;
     dl1.next_layer = &dl2; dl2.previous_layer = &dl1;
     dl2.next_layer = &sm; sm.previous_layer = &dl2;
     sm.next_layer = &ce; ce.previous_layer = &sm;
-    std::cout << "layers connected..." << std::endl;
+    //std::cout << "layers connected..." << std::endl;
 
     std::default_random_engine eng(9815);
     std::uniform_int_distribution<size_t> pick_test(0, 9'999);
     //                  20
-    for (int e = 0; e < 20; e++) {
+    for (int e = 0; e < 1; e++) {
 
         // Create shuffled sequence of training images.
         std::vector<int> training(60'000);
         std::iota(training.begin(), training.end(), 0);
         assert(*--training.end() == 59'999);
         std::shuffle(training.begin(), training.end(), eng);
-        std::cout << "sequence of training images shuffled..." << std::endl;
+        //std::cout << "sequence of training images shuffled..." << std::endl;
         //                  600
-        for (int r = 0; r < 600; r++) {
+        for (int r = 0; r < 300; r++) {
 
             if (r%100 == 0) {
                 // fprintf(stderr, "Begin predict...."); fflush(stderr);
@@ -1319,8 +1280,17 @@ main() {
         assert(a5(1, 1) == 1.1f);
         assert(a5(1, 2) == 1.1f);
     }
+    using std::chrono::high_resolution_clock;
+    using std::chrono::duration;
+    using std::chrono::duration_cast;
+    using std::chrono::milliseconds;
 
+    auto t1 = high_resolution_clock::now();
     run();
+    auto t2 = high_resolution_clock::now();
+
+    duration<double, std::milli> ms_double = t2 - t1;
+    std::cout << ms_double.count()/1000 << "s\n" << std::endl;
 }
 
 /*
