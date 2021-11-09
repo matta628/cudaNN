@@ -431,22 +431,29 @@ int N_NEURONS, int D, int H, int W){
 
     /*
      * TODO: for each neuron n check if kept, if relu false or if output(0,0,n) > 0
-     *           downstream_deriv of all n [d,h,w] += dropped(n)*upstream_deriv(n) * weight[d,h,w]
+     *           downstream_deriv of all n [d,h,w] += dropped(n)*upstream_deriv(n) * weight of n [d,h,w]
      *           weight_deriv of n [d,h,w] += (dropped(n)*upstream_deriv(n)*input[d,h,w]) / mb_size
      *           m_bias_deriv of n += (dropped(n)*upstream_deriv(n)) / mb_size
      */
-     int t = threadIdx.x + blockIdx.x * blockDim.x;
-     int n = t / (D*H*W);
-     int dhw = t % (D*H*W);
+     int DHW = D*H*W;
+     int dhw = threadIdx.x + blockIdx.x * blockDim.x;
 
-     //are these if statements bad?
-     if (d_current_kept[n] > 0){
-         if(!m_relu || d_output[n] > 0){
-             //can n_neuron threads access same dhw at once? is that problem?
-             d_downstream_deriv[dhw] += d_current_kept[n] * d_upstream_deriv[n] * d_weight[t];
-             d_weight_deriv[t] += (d_current_kept[n]*d_upstream_deriv[n]*d_input[dhw])/mb_size;
-             if (dhw==0){
-                 d_bias_deriv[n] += (d_current_kept[n]*d_upstream_deriv[n])/mb_size;
+     if (dhw < DHW){
+         for (int n = 0; n < N_NEURONS; n++){
+             if (d_current_kept[n] > 0){
+                 if (!m_relu || d_output[n] > 0){
+                     int ndhw = n*DHW + dhw;
+                     d_downstream_deriv[dhw] += d_current_kept[n] * d_upstream_deriv[n] * d_weight[ndhw];
+                     d_weight_deriv[ndhw] += (d_current_kept[n]*d_upstream_deriv[n]*d_input[dhw])/mb_size;
+                 }
+             }
+         }
+     }
+
+     if (dhw < N_NEURONS){
+         if (d_current_kept[dhw] > 0){
+             if (!m_relu || d_output[dhw] > 0){
+                 d_bias_deriv[dhw] += (d_current_kept[dhw]*d_upstream_deriv[dhw])/mb_size;
              }
          }
      }
@@ -459,6 +466,7 @@ FullyConnectedLayer<IN_DIMS, N_NEURONS>::backprop(const Output &full_upstream_de
     auto &upstream_deriv(full_upstream_deriv[0][0]);
     this->downstream_deriv = 0;
     auto &input(this->previous_layer->output);
+
 
     //TODO: copy host mem to device
     cudaError_t rv_ce;
@@ -526,6 +534,11 @@ FullyConnectedLayer<IN_DIMS, N_NEURONS>::backprop(const Output &full_upstream_de
     int block_size = 128;
     int grid_size = (NDHW + block_size - 1)/ block_size;
 
+
+//    for (int i = 0; i < 10; i++){
+//        std::cout << "downstream before backprop\t" << this->downstream_deriv[0][0][i] << std::endl;
+//    }
+
     //TODO: actually implement kernel
     backprop_dev<<<grid_size,block_size>>>(d_current_kept, m_relu, d_output, d_downstream_deriv,
         d_upstream_deriv, d_weight, d_weight_deriv, d_input, mb_size, d_bias_deriv,
@@ -552,7 +565,7 @@ FullyConnectedLayer<IN_DIMS, N_NEURONS>::backprop(const Output &full_upstream_de
     cudaFree(d_input);
     cudaFree(d_bias_deriv);
 
-    /*
+/*
     for (size_t i = 0; i < N_NEURONS; i++) {
         if (m_current_kept(i) > 0) {
             if (!m_relu || this->output(0, 0, i) > 0) {
@@ -569,8 +582,13 @@ FullyConnectedLayer<IN_DIMS, N_NEURONS>::backprop(const Output &full_upstream_de
             }
         }
     }
-    */
+*/
 
+/*
+    for (int i = 0; i < 10; i++){
+        std::cout << "downstream after backprop\t" << this->downstream_deriv[0][0][i] << std::endl;
+    }
+*/
     this->previous_layer->backprop(this->downstream_deriv, mb_size);
 }
 
@@ -682,31 +700,43 @@ FullyConnectedLayer<IN_DIMS, N_NEURONS>::update_weights(const float rate) {
 }
 
 __global__ void forward_dev(double *d_output, double *d_weight, double *d_input,
-double *d_bias, bool m_relu, double *d_current_kept, int DHW){
+double *d_bias, bool m_relu, double *d_current_kept,
+int N_NEURONS, int D, int H, int W){
     /*
      * TODO: for each neuron, sum up weight * input, out = sum + bias,
      * if relu then out = max(0, sum)
      * out = 0 if dropped, or 1/dropout_rate if not dropped
      */
-     int t = threadIdx.x + blockIdx.x * blockDim.x;
-     int n = t / DHW;
-     int dhw = t % DHW;
+     int n = threadIdx.x + blockIdx.x * blockDim.x;
 
-     d_output[n] += d_weight[t]*d_input[dhw];
-     if (dhw == 0){
+     if (n < N_NEURONS){
+         d_output[n] = 0;
+         for (int d = 0; d < D; d++){
+             for (int h = 0; h < H; h++){
+                 for (int w = 0; w < W; w++){
+                     int dhw = d*H*W + h*W + w;
+                     int ndhw = n*D*H*W + dhw;
+                     d_output[n] += d_weight[ndhw]*d_input[dhw];
+                 }
+             }
+         }
+
          d_output[n] += d_bias[n];
          if (m_relu){
              double out = d_output[n];
              d_output[n] = out >= 0 ? out : 0;
          }
          d_output[n] *= d_current_kept[n];
+
      }
+
 }
 
 template <typename IN_DIMS, size_t N_NEURONS>
 void
 FullyConnectedLayer<IN_DIMS, N_NEURONS>::forward(const Input &input, const Array<Input, N_NEURONS> &weight, const Array<double, N_NEURONS> &bias,
  const Array<double, N_NEURONS> &current_kept, Output &output) {
+
      //TODO: copy host mem to device
      cudaError_t rv_ce;
      int DHW = IN_DIMS::N;
@@ -715,8 +745,6 @@ FullyConnectedLayer<IN_DIMS, N_NEURONS>::forward(const Input &input, const Array
      //Array<1,1,N_NEURONS> output
      double *d_output;
      rv_ce = cudaMalloc(&d_output, N_NEURONS*sizeof(double));
-     gpu_assert(rv_ce);
-     rv_ce = cudaMemcpy(d_output, &output[0][0], N_NEURONS*sizeof(double), cudaMemcpyHostToDevice);
      gpu_assert(rv_ce);
 
      //Array<Array<D,H,W>, N_NEURON> m_weight
@@ -752,10 +780,11 @@ FullyConnectedLayer<IN_DIMS, N_NEURONS>::forward(const Input &input, const Array
      int grid_size = (NDHW + block_size - 1)/ block_size;
 
      //TODO: actually implement kernel
-     forward_dev<<<grid_size,block_size>>>(d_output, d_weight, d_input, d_bias, m_relu, d_current_kept, DHW);
+     forward_dev<<<grid_size,block_size>>>(d_output, d_weight, d_input, d_bias, m_relu, d_current_kept,
+         N_NEURONS, IN_DIMS::D, IN_DIMS::H, IN_DIMS::W);
 
      //TODO: copy device mem to host
-
+     double *out_test = new double[N_NEURONS];
      rv_ce = cudaMemcpy(&output[0][0], d_output, N_NEURONS*sizeof(double), cudaMemcpyDeviceToHost);
      gpu_assert(rv_ce);
 
@@ -766,7 +795,13 @@ FullyConnectedLayer<IN_DIMS, N_NEURONS>::forward(const Input &input, const Array
      cudaFree(d_bias);
      cudaFree(d_current_kept);
 
-     /*
+/*
+     for (int i = 0; i < N_NEURONS; i++){
+         std::cout << out_test[i] << ' ';
+     }
+     std::cout << std::endl;
+*/
+/*
      //std::cout << "FC Layer, forward: connect each neuron to everything & generate output from input" << std::endl;
      // Connect each neuron to everything.
      for (size_t i = 0; i < N_NEURONS; i++) {
@@ -787,9 +822,12 @@ FullyConnectedLayer<IN_DIMS, N_NEURONS>::forward(const Input &input, const Array
          // expected value.
          assert(current_kept(i) == 0 || current_kept(i) >= 1);
          out *= current_kept(i);
+
      }
-     */
- }
+*/
+
+
+}
 
 
 template <typename IN_DIMS, size_t N_NEURONS>
@@ -969,7 +1007,7 @@ SoftmaxLayer<N>::backprop(const typename OutputIF::Output &full_upstream_deriv, 
             }
         }
     }
-    //std::cout << "downstream_deriv " << downstream_deriv << std::endl;
+//    std::cout << "downstream_deriv " << downstream_deriv << std::endl;
     this->previous_layer->backprop(this->downstream_deriv, mb_size);
 }
 
@@ -1202,7 +1240,7 @@ run() {
 
     std::default_random_engine eng(9815);
     std::uniform_int_distribution<size_t> pick_test(0, 9'999);
-
+    //                  20
     for (int e = 0; e < 20; e++) {
 
         // Create shuffled sequence of training images.
@@ -1211,7 +1249,7 @@ run() {
         assert(*--training.end() == 59'999);
         std::shuffle(training.begin(), training.end(), eng);
         std::cout << "sequence of training images shuffled..." << std::endl;
-
+        //                  600
         for (int r = 0; r < 600; r++) {
 
             if (r%100 == 0) {
@@ -1327,7 +1365,7 @@ test2() {
 
 void
 run2() {
-
+    std::cout << "It works!" << std::endl;
     static float training_images[60'000][28][28];
     read_mnist_images("mnist/train-images-idx3-ubyte", training_images);
     output_pgm("img0.pgm", training_images[0]);
