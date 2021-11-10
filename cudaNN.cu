@@ -387,6 +387,7 @@ class FullyConnectedLayer : public HasInputLayer<IN_DIMS>, public HasOutputLayer
 
         const std::string m_name;
         const bool m_relu;
+        const int block_size;
 
         // N_NEURON array of Input (Array<D,H,W>)
         Array<Input, N_NEURONS> m_weight;
@@ -416,7 +417,7 @@ class FullyConnectedLayer : public HasInputLayer<IN_DIMS>, public HasOutputLayer
 
 template <typename IN_DIMS, size_t N_NEURONS>
 FullyConnectedLayer<IN_DIMS, N_NEURONS>::FullyConnectedLayer(const std::string &n, const bool relu, const double do_rate, const int seed_seq)
- : m_name(n), m_relu(relu), m_keep_prob(1 - do_rate), m_all_kept(1), m_eng(7389 + seed_seq) {
+ : m_name(n), m_relu(relu), m_keep_prob(1 - do_rate), m_all_kept(1), m_eng(7389 + seed_seq), block_size(128) {
 
     std::normal_distribution<double> init;
     // For each neuron, plane, row, and column...
@@ -519,9 +520,18 @@ FullyConnectedLayer<IN_DIMS, N_NEURONS>::backprop(const Output &full_upstream_de
     //TODO: copy host mem to device
     cudaError_t rv_ce;
 
-    int DHW = IN_DIMS::N;
+/*
+    H32 = 32;
+    while (H > H32){
+        H32 += 32
+    }
+    W32 = 32;
+    while (W > W32){
+        W32 += 32;
+    }
+    int DHW = IN_DIMS::D*H32*W32;
     int NDHW = N_NEURONS*DHW;
-
+*/
     //Array<N_NEURONS> m_current_kept
     rv_ce = cudaMemcpy(d_current_kept, &this->m_current_kept, N_NEURONS*sizeof(double), cudaMemcpyHostToDevice);
     gpu_assert(rv_ce);
@@ -555,7 +565,6 @@ FullyConnectedLayer<IN_DIMS, N_NEURONS>::backprop(const Output &full_upstream_de
     gpu_assert(rv_ce);
 
     //TODO: calculate optimal sizes
-    int block_size = 128;
     int grid_size = (NDHW + block_size - 1)/ block_size;
 
     //TODO: actually implement kernel
@@ -647,7 +656,6 @@ FullyConnectedLayer<IN_DIMS, N_NEURONS>::update_weights(const float rate) {
     gpu_assert(rv_ce);
 
     //TODO: calculate optimal sizes
-    int block_size = 128;
     int grid_size = (NDHW + block_size - 1)/ block_size;
 
     //TODO: actually implement kernel
@@ -751,7 +759,6 @@ FullyConnectedLayer<IN_DIMS, N_NEURONS>::forward(const Input &input, const Array
      gpu_assert(rv_ce);
 
      //TODO: calculate optimal sizes
-     int block_size = 128;
      int grid_size = (NDHW + block_size - 1)/ block_size;
 
      //TODO: actually implement kernel
